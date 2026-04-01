@@ -6,8 +6,12 @@ const int weights[8] = {-3500, -2500, -1500, -500, 500, 1500, 2500, 3500};      
 
 //Pin definitions
 const int sensorPins[8] = {A0, A1, A2, A3, A4, A5, A6, A7};                     //Pre-defines the pins from which the arduino reads/the ones connected to IR sensor
-const int externalLED = 13;                                                     //Pre-defines the pin for the LED that is on at the end
-const int calibrationLED = 12;                                                  //Pre-defines the pin for the LED that is on at the time of calibration
+const int externalLED = 12;                                                     //Pre-defines the pin for the LED that is on at the end
+const int calibrationLED = 11;                                                  //Pre-defines the pin for the LED that is on at the time of calibration
+const int idleLED = LED_BUILTIN;
+const int calibrationButtonPin = 2;                                             //Pre-defines the pin connected to the calibration button, Note that D2 is a digital pin with interrupt capability
+const int dryRunButtonPin = 3;                                                  //Pre-defines the pin connected to the dry run button, Note that D3 is a digital pin with interrupt capability
+const int actualRunButtonPin = 4;                                               //Pre-defines the pin connected to the actual run button
 
 //Sensor and calibration variables
 bool polarity;                                                                  //0 means black tape on white bg(darker tape), 1 means white tape on black bg(lighter tape), actual colors could be anything
@@ -137,7 +141,6 @@ void startCalibration(){
   weightedLinePosition = 0;
   activeSensorCount = 0;
   lineDetected = false;
-  isCalibrated = false;
   endLEDState = false;
   calibState = calibSampling;
   stopMotors();
@@ -149,10 +152,14 @@ void runCalibration(){
 
 void setup() {
   // put your setup code here, to run once:
-
+  pinMode(externalLED, OUTPUT);
+  pinMode(calibrationLED, OUTPUT);
+  pinMode(actualRunButtonPin, INPUT);
+  pinMode(dryRunButtonPin, INPUT);
+  pinMode(calibrationButtonPin, INPUT);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-
+  currentTime = millis();
 }
