@@ -3,12 +3,13 @@
 const int AlanConstant = 1000;                                                  //Used for scaling all the normalized fractions to a standardized range in honor of Alan
 const int normalizedThreshold = AlanConstant/2;                                 //The threshold value for the normalized range which determines the difference between the existence of a line and the contrary.
 const int weights[8] = {-3500, -2500, -1500, -500, 500, 1500, 2500, 3500};      //Pre-assigned weights for calculating the weighted mean
+const int calibTimeLimit = 3000;                                                //Maximum time it should calibrate for in ms
 
 //Pin definitions
 const int sensorPins[8] = {A0, A1, A2, A3, A4, A5, A6, A7};                     //Pre-defines the pins from which the arduino reads/the ones connected to IR sensor
-const int externalLED = 12;                                                     //Pre-defines the pin for the LED that is on at the end
-const int calibrationLED = 11;                                                  //Pre-defines the pin for the LED that is on at the time of calibration
-const int idleLED = LED_BUILTIN;
+const int endLED = 12;                                                          //Pre-defines the pin for the LED that is on at the end
+const int calibLED = 11;                                                        //Pre-defines the pin for the LED that is on at the time of calibration
+const int idleLED = LED_BUILTIN;                                                //Pre-defines the pin for the LED on during idle mode
 const int calibrationButtonPin = 2;                                             //Pre-defines the pin connected to the calibration button, Note that D2 is a digital pin with interrupt capability
 const int dryRunButtonPin = 3;                                                  //Pre-defines the pin connected to the dry run button, Note that D3 is a digital pin with interrupt capability
 const int actualRunButtonPin = 4;                                               //Pre-defines the pin connected to the actual run button
@@ -54,7 +55,7 @@ int pathExecIndex;                                                              
 
 //Mode and State variables
 //NOTE : In calibration mode, the general state of the robot is irrelevant
-enum Mode{idleMode, calibrationMode, dryRunMode, actualRunMode};                //Definition of modes
+enum Mode{idleMode, calibMode, dryRunMode, actualRunMode};                      //Definition of modes
 Mode mode;                                                                      //Variable to store the mode
 enum State{idleState, followingLine, atJunction, turning, atEnd};               //Definition of general states
 State state;                                                                    //Variable to store the state
@@ -78,23 +79,74 @@ unsigned long turnStartTime;                                                    
 unsigned long junctionStartTime;                                                //stores the timestamp of when the junction was seen
 unsigned long dryRunButtonDebounce;                                             //Acts as a debounce for the dry run button
 unsigned long actualRunButtonDebounce;                                          //Acts as a debounce for the actual run button
-unsigned long calibrationButtonDebouce;                                         //Acts as a debounce for the calibration button
+unsigned long calibrationButtonDebounce;                                        //Acts as a debounce for the calibration button
 
 /*----------------------------------------FUNCTIONS----------------------------------------*/
 //Function Declarations--------------------------------------------------------------------//
-void stopMotors();
-void readSensors();
-void updateMinMax();
-void normalizeReadings();
-void updateSensorBool();
-void startCalibration();
-void runCalibration();
+void stopMotors();                                                              //Stops the movement of motors  
+void readSensors();                                                             //Reads input from the sensors
+void updateMinMax();                                                            //Updates raw min and max values from the sensor
+void normalizeReadings();                                                       //Normalizes the readings to the Alan scale
+void updateSensorBool();                                                        //Updates the sensorBool array values
+void startCalibration();                                                        //Starts calibration process
+void runCalibration();                                                          //Actual calibration process
+void endCalibration();                                                          //Ends the calibration process
+void calculateLinePosition();                                                   //Calculates the position of the line using weights
 
 //Sensor and Calibration Functions---------------------------------------------------------//
+void startCalibration(){
+  mode = calibMode;
+  calibState = calibStart;
+  calibLEDState = true;
+  digitalWrite(calibLED, HIGH);
+  digitalWrite(idleLED, LOW);
+  currentTime = millis();
+  lastCalibTime = currentTime;
+  isCalibrated = false;
+  for(int i = 0; i<8; i++){
+    sensorMax[i] = 0;
+    sensorMin[i] = 1023;
+    sensorRaw[i] = 0;
+    sensorNormalized[i] = 0;
+    sensorBool[i] = false;
+  }
+  weightedLinePosition = 0;
+  activeSensorCount = 0;
+  lineDetected = false;
+  endLEDState = false;
+  polarity = false;
+  stopMotors();
+  calibState = calibSampling;
+}
+
+//This function will be called repeatedly by loop()
+void runCalibration(){
+    if(calibState==calibSampling){
+      readSensors();
+      updateMinMax();
+      if(millis()-lastCalibTime>=calibTimeLimit){
+        long int centreSum = 0, edgeSum = 0;
+        for(int i = 2; i<6; i++) centreSum += sensorMin[i]+(sensorMax[i]-sensorMin[i])/2;
+        for(int i = 0; i<2; i++) edgeSum += sensorMin[i] + (sensorMax[i]-sensorMin[i])/2;
+        for(int i = 6; i<8; i++) edgeSum += sensorMin[i] + (sensorMax[i]-sensorMin[i])/2;
+        polarity = centreSum>edgeSum?1:0;
+        calibState = calibEnd;
+      }
+    }
+    if(calibState==calibEnd) endCalibration();
+}
+
+void endCalibration(){
+  isCalibrated = true;
+  calibState = calibIdle;
+  mode = idleMode;
+  digitalWrite(calibrationLED, LOW);
+  digitalWrite(idleLED, HIGH);
+}
+
 void readSensors(){
   for(int i = 0; i<8; i++) sensorRaw[i] = analogRead(sensorPins[i]);
 }
-
 
 void updateMinMax(){
   for(int i = 0; i<8; i++){
@@ -123,40 +175,22 @@ void updateSensorBool(){
       activeSensorCount++;
       lineDetected = true;
     }
+    
   }
 }
 
-void startCalibration(){
-  calibState = calibStart;
-  calibLEDState = true;
-  lastCalibTime = currentTime;
-  isCalibrated = false;
-  for(int i = 0; i<8; i++){
-    sensorMax[i] = 0;
-    sensorMin[i] = 1023;
-    sensorRaw[i] = 0;
-    sensorNormalized[i] = 0;
-    sensorBool[i] = false;
-  }  
-  weightedLinePosition = 0;
-  activeSensorCount = 0;
-  lineDetected = false;
-  endLEDState = false;
-  calibState = calibSampling;
-  stopMotors();
-}
-
-void runCalibration(){
-    
+//PID Functions----------------------------------------------------------------------------//
+void calculateLinePosition(){
+  
 }
 
 void setup() {
   // put your setup code here, to run once:
   pinMode(externalLED, OUTPUT);
   pinMode(calibrationLED, OUTPUT);
-  pinMode(actualRunButtonPin, INPUT);
-  pinMode(dryRunButtonPin, INPUT);
-  pinMode(calibrationButtonPin, INPUT);
+  pinMode(actualRunButtonPin, INPUT_PULLUP);
+  pinMode(dryRunButtonPin, INPUT_PULLUP);
+  pinMode(calibrationButtonPin, INPUT_PULLUP);
 }
 
 void loop() {
