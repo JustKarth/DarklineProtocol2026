@@ -1,6 +1,7 @@
 /*----------------------------------------VARIABLES----------------------------------------*/
 //Global Constants
 const int AlanConstant = 1000;                                                  //Used for scaling all the normalized fractions to a standardized range in honor of Alan
+const int SwiniScale = 255;                                                     //Used for defining a scale for motors speeds and for ease of PWM in honor of Swini
 const int normalizedThreshold = AlanConstant/2;                                 //The threshold value for the normalized range which determines the difference between the existence of a line and the contrary.
 const int weights[8] = {-3500, -2500, -1500, -500, 500, 1500, 2500, 3500};      //Pre-assigned weights for calculating the weighted mean
 const int calibTimeLimit = 3000;                                                //Maximum time it should calibrate for in ms
@@ -13,6 +14,12 @@ const int idleLED = LED_BUILTIN;                                                
 const int calibrationButtonPin = 2;                                             //Pre-defines the pin connected to the calibration button, Note that D2 is a digital pin with interrupt capability
 const int dryRunButtonPin = 3;                                                  //Pre-defines the pin connected to the dry run button, Note that D3 is a digital pin with interrupt capability
 const int actualRunButtonPin = 4;                                               //Pre-defines the pin connected to the actual run button
+const int PWMA = 5;                                                             //Pre-defines the pin for PWM of Motor A (The left motor)
+const int AIN2 = 6;                                                             //Pre-defines the pin for AIN2 of the left motor
+const int AIN1 = 7;                                                             //Pre-defines the pin for AIN1 of the left motor
+const int BIN1 = 8;                                                             //Pre-defines the pin for BIN1 of the right motor
+const int BIN2 = 9;                                                             //Pre-defines the pin for BIN2 of the right motor
+const int PWMB = 10;                                                            //Pre-defines the pin for PWM of Motor B (The right motor)
 
 //Sensor and calibration variables
 bool polarity;                                                                  //0 means black tape on white bg(darker tape), 1 means white tape on black bg(lighter tape), actual colors could be anything
@@ -21,7 +28,6 @@ int sensorNormalized[8] = {0, 0, 0, 0, 0, 0, 0, 0};                             
 int sensorMax[8] = {0, 0, 0, 0, 0, 0, 0, 0};                                    //Max value each sensor reads (defines limits)
 int sensorMin[8] = {1023, 1023, 1023, 1023, 1023, 1023, 1023, 1023};            //Min value each sensor reads (defines limits)
 bool sensorBool[8] = {false, false, false, false, false, false, false, false};  //It is 0 or 1 based on whether the bot detects a line or not
-int weightedLinePosition = 0;                                                   //Gives the weighted number which determines where the line is
 int activeSensorCount = 0;                                                      //How many sensors detect a line
 bool lineDetected = false;                                                      //true if atleast one sensor sees the line
 bool isCalibrated = false;                                                      //Whether the auto-calibration is done or not
@@ -35,10 +41,11 @@ float Kp;                                                                       
 float Ki;                                                                       //Integral Gain
 float Kd;                                                                       //Derivative Gain
 float correction;                                                               //PID output of correction to be made in motor speed
+int weightedLinePosition = 0;                                                   //Gives the weighted number which determines where the line is
 int lastPosition;                                                               //Incase the bot gets lost
 
 //Motor Control Variables
-const int maxSpeed = 255;                                                       //Upper speed limit, full power to motor
+const int maxSpeed = SwiniScale;                                                //Upper speed limit, full power to motor
 const int minSpeed = 0;                                                         //Lower speed limit, no power to motor
 int baseSpeed;                                                                  //This will be set as dryBaseSpeed or actualBaseSpeed but used directly at operation time
 int dryBaseSpeed;                                                               //Base speed for dry run (slower and more stable)
@@ -83,15 +90,22 @@ unsigned long calibrationButtonDebounce;                                        
 
 /*----------------------------------------FUNCTIONS----------------------------------------*/
 //Function Declarations--------------------------------------------------------------------//
-void stopMotors();                                                              //Stops the movement of motors  
 void readSensors();                                                             //Reads input from the sensors
 void updateMinMax();                                                            //Updates raw min and max values from the sensor
-void normalizeReadings();                                                       //Normalizes the readings to the Alan scale
+void normalizeReadings();                                                       //Normalizes the readings to the Alan scale and also creates a standardized value of higher for line and lower for background based on polarity detected
 void updateSensorBool();                                                        //Updates the sensorBool array values
 void startCalibration();                                                        //Starts calibration process
 void runCalibration();                                                          //Actual calibration process
 void endCalibration();                                                          //Ends the calibration process
 void calculateLinePosition();                                                   //Calculates the position of the line using weights
+void setMotorSpeeds(int leftSpeed, int rightSpeed);                             //Standard function for setting the motor speeds
+void moveForward(int motorSpeed);                                               //Sets motor speeds to move forward
+void moveBackward(int motorSpeed);                                              //Sets motor speeds to move backward
+void pivotLeft(int motorSpeed);                                                 //Pivots the bot left, Ross' favorite function designed for sharp turns
+void pivotRight(int motorSpeed);                                                //Pivots the bot right, Ross' other favorite function designed for sharp turns
+void turnLeft(int motorSpeed);                                                  //Turns the bot to the left, designed for smooth turns
+void turnRight(int motorSpeed);                                                 //Turns the bot to the right, designed for smooth turns
+void stopMotors();                                                              //Stops the movement of motors  
 
 //Sensor and Calibration Functions---------------------------------------------------------//
 void startCalibration(){
@@ -161,6 +175,7 @@ void normalizeReadings(){
     else{
       sensorNormalized[i] = ((long)(sensorRaw[i]-sensorMin[i])*AlanConstant)/(sensorMax[i]-sensorMin[i]); 
       sensorNormalized[i] = constrain(sensorNormalized[i], 0, AlanConstant);
+      sensorNormalized[i] = polarity==0?AlanConstant-sensorNormalized[i]:sensorNormalized[i];
     }
   }
 }
@@ -169,8 +184,7 @@ void updateSensorBool(){
   activeSensorCount = 0;
   lineDetected = false;
   for(int i = 0; i<8; i++){
-    if(polarity==0) sensorBool[i] = sensorNormalized[i]<normalizedThreshold;
-    else sensorBool[i] = sensorNormalized[i]>normalizedThreshold;
+    sensorBool[i] = sensorNormalized[i]>normalizedThreshold;
     if(sensorBool[i]){
       activeSensorCount++;
       lineDetected = true;
@@ -181,13 +195,91 @@ void updateSensorBool(){
 
 //PID Functions----------------------------------------------------------------------------//
 void calculateLinePosition(){
-  
+  long int numeratorSum = 0;
+  long int denominatorSum = 0;
+  for(int i = 0; i<8; i++){
+    numeratorSum += (long)sensorNormalized[i]*weights[i];
+    denominatorSum += sensorNormalized[i];
+  }
+  if(lineDetected){
+    weightedLinePosition = numeratorSum/denominatorSum;
+    lastPosition = weightedLinePosition;
+  }else{
+    if(lastPosition>0){
+      weightedLinePosition = 3500;
+    }else{
+      weightedLinePosition = -3500;
+    }
+  }
 }
 
+//Motor Functions------------------------------------------------------------------------//
+void setMotorSpeeds(int leftSpeed, int rightSpeed){
+  leftSpeed = constrain(leftSpeed, -SwiniScale, SwiniScale);
+  rightSpeed = constrain(rightSpeed, -SwiniScale, SwiniScale);
+
+  if(!leftSpeed){
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, LOW);
+  }else if(leftSpeed>0){
+    digitalWrite(AIN1, HIGH);
+    digitalWrite(AIN2, LOW);
+  }else{
+    digitalWrite(AIN1, LOW);
+    digitalWrite(AIN2, HIGH);
+    leftSpeed = -leftSpeed;
+  }
+
+  if(!rightSpeed){
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, LOW);
+  }else if(rightSpeed>0){
+    digitalWrite(BIN1, HIGH);
+    digitalWrite(BIN2, LOW);
+  }else{
+    digitalWrite(BIN1, LOW);
+    digitalWrite(BIN2, HIGH);
+    rightSpeed = -rightSpeed;
+  }
+
+  analogWrite(PWMA, leftSpeed);
+  analogWrite(PWMB, rightSpeed);
+}
+
+//NOTE : In the below functions motorSpeed has to strictly be the magnitude (only positive values)
+void moveForward(int motorSpeed){
+  setMotorSpeeds(motorSpeed, motorSpeed);
+}
+
+void moveBackward(int motorSpeed){
+  setMotorSpeeds(-motorSpeed, -motorSpeed);
+}
+
+void pivotLeft(int motorSpeed){
+  setMotorSpeeds(-motorSpeed, motorSpeed);
+}
+
+void pivotRight(int motorSpeed){
+  setMotorSpeeds(motorSpeed, -motorSpeed);
+}
+
+void turnLeft(int motorSpeed){
+  setMotorSpeeds(0, motorSpeed);
+}
+
+void turnRight(int motorSpeed){
+  setMotorSpeeds(motorSpeed, 0);
+}
+
+void stopMotors(){
+  setMotorSpeeds(0, 0);
+}
+
+//STANDARD FUNCTIONS---------------------------------------------------------------------//
 void setup() {
   // put your setup code here, to run once:
-  pinMode(externalLED, OUTPUT);
-  pinMode(calibrationLED, OUTPUT);
+  pinMode(endLED, OUTPUT);
+  pinMode(calibLED, OUTPUT);
   pinMode(actualRunButtonPin, INPUT_PULLUP);
   pinMode(dryRunButtonPin, INPUT_PULLUP);
   pinMode(calibrationButtonPin, INPUT_PULLUP);
