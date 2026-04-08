@@ -106,6 +106,7 @@ void pivotRight(int motorSpeed);                                                
 void turnLeft(int motorSpeed);                                                  //Turns the bot to the left, designed for smooth turns
 void turnRight(int motorSpeed);                                                 //Turns the bot to the right, designed for smooth turns
 void stopMotors();                                                              //Stops the movement of motors  
+void applyPIDCorrection(int motorSpeed, float correction);
 
 //Sensor and Calibration Functions---------------------------------------------------------//
 void startCalibration(){
@@ -273,6 +274,12 @@ void turnRight(int motorSpeed){
 
 void stopMotors(){
   setMotorSpeeds(0, 0);
+}
+
+void applyPIDCorrection(int baseSpeed, float correction){
+  int leftSpeed = baseSpeed + correction;
+  int rightSpeed = baseSpeed - correction;
+  setMotorSpeeds(leftSpeed, rightSpeed);
 }
 
 //STANDARD FUNCTIONS---------------------------------------------------------------------//
