@@ -7,13 +7,14 @@ const int ManyasMilliseconds=50;                                                
 const int debounceDelay = 200;                                                  //Standard duration for debounce
 const int normalizedThreshold = AlanConstant/2;                                 //The threshold value for the normalized range which determines the difference between the existence of a line and the contrary.
 const int weights[8] = {-3500, -2500, -1500, -500, 500, 1500, 2500, 3500};      //Pre-assigned weights for calculating the weighted mean
-const int calibTimeLimit = 3000;                                                //Maximum time it should calibrate for in ms
-const int blindTurnTime = 150;                                                  //Time for which the bot blindly turns to get off the line
-const int uTurnBlindTime = 300;                                                 //Time for which the bot blindry turns at dead ends
-const int junctionRepositioningRelay = 120;                                     //Required for repositioning the bot's pivot point over the junction when pivoting after a junction has been detected
+const int calibTimeLimit = 5000;                                                //Maximum time it should calibrate for in ms
+const int blindTurnTime = 200;                                                  //Time for which the bot blindly turns to get off the line
+const int uTurnBlindTime = 400;                                                 //Time for which the bot blindry turns at dead ends
+const int deadEndDelay = 150;                                                  
+const int junctionRepositioningRelay = 180;                                     //Required for repositioning the bot's pivot point over the junction when pivoting after a junction has been detected
 
 //Pin definitions
-const int sensorPins[8] = {A0, A1, A2, A3, A4, A5, A6, A7};                     //Pre-defines the pins from which the arduino reads/the ones connected to IR sensor
+const int sensorPins[8] = {A7, A6, A5, A4, A3, A2, A1, A0};                     //Pre-defines the pins from which the arduino reads/the ones connected to IR sensor
 const int endLED = 12;                                                          //Pre-defines the pin for the LED that is on at the end
 const int calibLED = 11;                                                        //Pre-defines the pin for the LED that is on at the time of calibration
 const int idleLED = LED_BUILTIN;                                                //Pre-defines the pin for the LED on during idle mode
@@ -28,7 +29,7 @@ const int BIN2 = 6;                                                             
 const int PWMB = 5;                                                             //Pre-defines the pin for PWM of Motor B (The right motor)
 
 //Sensor and calibration variables
-bool polarity;                                                                  //0 means black tape on white bg(darker tape), 1 means white tape on black bg(lighter tape), actual colors could be anything
+bool polarity = false;                                                          //0 means black tape on white bg(darker tape), 1 means white tape on black bg(lighter tape), actual colors could be anything
 int sensorRaw[8] = {0, 0, 0, 0, 0, 0, 0, 0};                                    //Direct readings, Analog
 int sensorNormalized[8] = {0, 0, 0, 0, 0, 0, 0, 0};                             //Normalized form of direct readings
 int sensorMax[8] = {0, 0, 0, 0, 0, 0, 0, 0};                                    //Max value each sensor reads (defines limits)
@@ -43,8 +44,8 @@ float errorP;                                                                   
 float errorI;                                                                   //accumulated error
 float errorD;                                                                   //derivative term for error
 float prevError;                                                                //error in the last loop
-float Kp = 0.044;                                                               //Proportional Gain
-float Ki = 0.00;                                                                //Integral Gain
+float Kp = 0.06;                                                                //Proportional Gain
+float Ki = 0.001;                                                               //Integral Gain
 float Kd = 1.2;                                                                 //Derivative Gain
 float correction;                                                               //PID output of correction to be made in motor speed
 int weightedLinePosition = 0;                                                   //Gives the weighted number which determines where the line is
@@ -53,9 +54,9 @@ int lastPosition;                                                               
 //Motor Control Variables
 const int maxSpeed = SwiniScale;                                                //Upper speed limit, full power to motor
 const int minSpeed = 0;                                                         //Lower speed limit, no power to motor
-int dryBaseSpeed = 0.6*maxSpeed;                                                //Base speed for dry run (slower and more stable)
-int actualBaseSpeed = 0.8*maxSpeed;                                             //Base speed for actual run (can be faster)
-int baseSpeed = 0.6*maxSpeed;                                                   //This will be set as dryBaseSpeed or actualBaseSpeed but used directly at operation time
+int dryBaseSpeed = 0.2*maxSpeed;                                                //Base speed for dry run (slower and more stable)
+int actualBaseSpeed = 0.6*maxSpeed;                                             //Base speed for actual run (can be faster)
+int baseSpeed = 0.2*maxSpeed;                                                   //This will be set as dryBaseSpeed or actualBaseSpeed but used directly at operation time
 char currentTurn = '\0';                                                        //The turn being executed right now
 
 //Path Logic Variables
@@ -142,6 +143,9 @@ void checkButtons(){
         endConfirmed = false;
         turningComplete = false;
         currentTurn = '\0';
+        digitalWrite(endLED, LOW);
+        digitalWrite(calibLED, LOW); 
+        digitalWrite(idleLED, HIGH); 
       }
     }
   }else if(digitalRead(dryRunButtonPin)==LOW){
@@ -153,6 +157,14 @@ void checkButtons(){
         pathIndex = 0;
         baseSpeed = dryBaseSpeed;
         lineLost = false;
+
+        junctionDetected = false;
+        junctionConfirmed = false;
+        endConfirmed = false;
+        turningComplete = false;
+        errorI = 0;
+        prevError = 0;
+        deadEndStartTime = 0;
 
         digitalWrite(idleLED, LOW);
         digitalWrite(endLED, LOW);
@@ -197,7 +209,6 @@ void startCalibration(){
   activeSensorCount = 0;
   lineDetected = false;
   endLEDState = false;
-  polarity = false;
   stopMotors();
   calibState = calibSampling;
 }
@@ -207,14 +218,7 @@ void runCalibration(){
     if(calibState==calibSampling){
       readSensors();
       updateMinMax();
-      if(millis()-lastCalibTime>=calibTimeLimit){
-        long int centreSum = 0, edgeSum = 0;
-        for(int i = 2; i<6; i++) centreSum += sensorMin[i]+(sensorMax[i]-sensorMin[i])/2;
-        for(int i = 0; i<2; i++) edgeSum += sensorMin[i] + (sensorMax[i]-sensorMin[i])/2;
-        for(int i = 6; i<8; i++) edgeSum += sensorMin[i] + (sensorMax[i]-sensorMin[i])/2;
-        polarity = centreSum>edgeSum?1:0;
-        calibState = calibEnd;
-      }
+      if(millis()-lastCalibTime>=calibTimeLimit) calibState = calibEnd;
     }
     if(calibState==calibEnd) endCalibration();
 }
@@ -223,7 +227,7 @@ void endCalibration(){
   isCalibrated = true;
   calibState = calibIdle;
   mode = idleMode;
-  digitalWrite(calibrationLED, LOW);
+  digitalWrite(calibLED, LOW);
   digitalWrite(idleLED, HIGH);
 }
 
@@ -323,7 +327,7 @@ void confirmJunction(){
 void checkDeadEnd(){
   if(state==followingLine && !lineDetected){
     if(deadEndStartTime==0) deadEndStartTime = currentTime;
-    if(currentTime-deadEndStartTime>ManyasMilliseconds){
+    if(currentTime-deadEndStartTime>deadEndDelay){
       currentTurn = 'B';
       state = turning;
       turnStartTime = currentTime;
@@ -403,7 +407,7 @@ void executeTurn(){
 }
 
 void optimizePath(){
-    while(pathIndex>3 || path[pathIndex-2] == 'B'){
+    while(pathIndex>3 && path[pathIndex-2] == 'B'){
     int angle = 0;
     for(int i = 1; i<=3; i++){
       switch(path[pathIndex-i]){
@@ -480,6 +484,7 @@ void setup() {
   // put your setup code here, to run once:
   pinMode(endLED, OUTPUT);
   pinMode(calibLED, OUTPUT);
+  pinMode(idleLED, OUTPUT);
   pinMode(PWMA, OUTPUT);
   pinMode(AIN2, OUTPUT);
   pinMode(AIN1, OUTPUT);
