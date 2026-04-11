@@ -10,6 +10,7 @@ const int weights[8] = {-3500, -2500, -1500, -500, 500, 1500, 2500, 3500};      
 const int calibTimeLimit = 3000;                                                //Maximum time it should calibrate for in ms
 const int blindTurnTime = 150;                                                  //Time for which the bot blindly turns to get off the line
 const int uTurnBlindTime = 300;                                                 //Time for which the bot blindry turns at dead ends
+const int junctionRepositioningRelay = 120;                                     //Required for repositioning the bot's pivot point over the junction when pivoting after a junction has been detected
 
 //Pin definitions
 const int sensorPins[8] = {A0, A1, A2, A3, A4, A5, A6, A7};                     //Pre-defines the pins from which the arduino reads/the ones connected to IR sensor
@@ -42,9 +43,9 @@ float errorP;                                                                   
 float errorI;                                                                   //accumulated error
 float errorD;                                                                   //derivative term for error
 float prevError;                                                                //error in the last loop
-float Kp;                                                                       //Proportional Gain
-float Ki;                                                                       //Integral Gain
-float Kd;                                                                       //Derivative Gain
+float Kp = 0.044;                                                               //Proportional Gain
+float Ki = 0.00;                                                                //Integral Gain
+float Kd = 1.2;                                                                 //Derivative Gain
 float correction;                                                               //PID output of correction to be made in motor speed
 int weightedLinePosition = 0;                                                   //Gives the weighted number which determines where the line is
 int lastPosition;                                                               //Incase the bot gets lost
@@ -52,12 +53,9 @@ int lastPosition;                                                               
 //Motor Control Variables
 const int maxSpeed = SwiniScale;                                                //Upper speed limit, full power to motor
 const int minSpeed = 0;                                                         //Lower speed limit, no power to motor
-int baseSpeed;                                                                  //This will be set as dryBaseSpeed or actualBaseSpeed but used directly at operation time
-int dryBaseSpeed;                                                               //Base speed for dry run (slower and more stable)
-int actualBaseSpeed;                                                            //Base speed for actual run (can be faster)
-int leftSpeed;                                                                  //speed of left motor during adjustment
-int rightSpeed;                                                                 //speed of right motor during adjustment, difference in speed causes rotation
-int turnDuration;                                                               //how long to turn for
+int dryBaseSpeed = 0.6*maxSpeed;                                                //Base speed for dry run (slower and more stable)
+int actualBaseSpeed = 0.8*maxSpeed;                                             //Base speed for actual run (can be faster)
+int baseSpeed = 0.6*maxSpeed;                                                   //This will be set as dryBaseSpeed or actualBaseSpeed but used directly at operation time
 char currentTurn = '\0';                                                        //The turn being executed right now
 
 //Path Logic Variables
@@ -85,11 +83,12 @@ bool lineLost = false;                                                          
 
 //Time Variables, unit : ms
 unsigned long currentTime;                                                      //stores current time, used as reference, called by millis()
-unsigned long lastTime;                                                         //reusable timestamp for the last event that occured
+unsigned long deadEndStartTime;                                                 //stores the last time when deadEnd check started
 unsigned long lastCalibTime;                                                    //stores the last time calibration started
 unsigned long whiteStartTime;                                                   //starts the timer when sensors go all white to detect end
 unsigned long turnStartTime;                                                    //stores the timestamp of when it starts turning
 unsigned long junctionStartTime;                                                //stores the timestamp of when the junction was seen
+unsigned long junctionRelayStartTime;                                           //starts the timer for positioning the pivot over the junction
 unsigned long dryRunButtonDebounce;                                             //Acts as a debounce for the dry run button
 unsigned long actualRunButtonDebounce;                                          //Acts as a debounce for the actual run button
 unsigned long calibrationButtonDebounce;                                        //Acts as a debounce for the calibration button
@@ -114,10 +113,11 @@ void pivotRight(int motorSpeed);                                                
 void turnLeft(int motorSpeed);                                                  //Turns the bot to the left, designed for smooth turns
 void turnRight(int motorSpeed);                                                 //Turns the bot to the right, designed for smooth turns
 void stopMotors();                                                              //Stops the movement of motors  
-void applyPIDCorrection(int motorSpeed, float correction)                       //Applies the correction from PID function to the motor speed
+void applyPIDCorrection(int motorSpeed, float correction);                      //Applies the correction from PID function to the motor speed
 void checkAvailablePaths();                                                     //Checks which paths are available here
 void detectJunction();                                                          //Detects if there is a junction
 void confirmJunction();                                                         //Confirms if there is a junction
+void checkDeadEnd();                                                            //Checks if there is a dead end
 void makeTurnDecision();                                                        //Decides what the current turn should be
 void executeTurn();                                                             //Executes the turn decision
 void optimizePath();                                                            //One of the most important functions we have made to reduce the path based on recorded moves
@@ -270,11 +270,11 @@ void calculateLinePosition(){
     numeratorSum += (long)sensorNormalized[i]*weights[i];
     denominatorSum += sensorNormalized[i];
   }
-  if(lineDetected){
+  if(lineDetected && denominatorSum!=0){
     weightedLinePosition = numeratorSum/denominatorSum;
     lastPosition = weightedLinePosition;
   }else{
-    if(lastPosition>0){
+    if(lastPosition>=0){
       weightedLinePosition = 3500;
     }else{
       weightedLinePosition = -3500;
@@ -299,12 +299,12 @@ void checkAvailablePaths(){
 }
 
 void detectJunction(){
-  if(junctionDetected || state==atJunction || state == turning || state == atEnd) return;
+  if(junctionDetected || state!=followingLine ) return;
   junctionDetected = ((sensorBool[0]&&sensorBool[1]) || (sensorBool[6]&&sensorBool[7]) || activeSensorCount>=7);
   if(junctionDetected) junctionStartTime = currentTime;
 }
 
-void verifyJunction(){
+void confirmJunction(){
   if(junctionDetected && !junctionConfirmed && (currentTime - junctionStartTime > ManyasMilliseconds)){
     checkAvailablePaths();
     if(activeSensorCount>=7){
@@ -312,9 +312,32 @@ void verifyJunction(){
       state = atEnd;
     }else if(junctions[0] || junctions[2]){
       junctionConfirmed = true;
-      state = atJunction;  
+      state = atJunction;
+      junctionRelayStartTime = currentTime;
     }else{
       junctionDetected = false;  
+    }
+  }
+}
+
+void checkDeadEnd(){
+  if(state==followingLine && !lineDetected){
+    if(deadEndStartTime==0) deadEndStartTime = currentTime;
+    if(currentTime-deadEndStartTime>ManyasMilliseconds){
+      currentTurn = 'B';
+      state = turning;
+      turnStartTime = currentTime;
+      deadEndStartTime = 0;
+      if(mode==dryRunMode){
+        if(pathIndex<KarthiksPathLength){
+          path[pathIndex++] = 'B';
+          optimizePath();
+        }
+      }
+    }else{
+      if(lineDetected){
+        deadEndStartTime = 0;        
+      }
     }
   }
 }
@@ -351,6 +374,8 @@ void executeTurn(){
     turningComplete = false;
     junctionDetected = false;
     junctionConfirmed = false;
+    prevError = 0;
+    errorI = 0;
     return;
   }
 
@@ -361,7 +386,7 @@ void executeTurn(){
       break;
     case 'R':
       pivotRight(baseSpeed);
-      if(currentTime-turnStartTime>blindTurnTime && (sensorBool[3] || sensorBool[4])) turningComplete = false;
+      if(currentTime-turnStartTime>blindTurnTime && (sensorBool[3] || sensorBool[4])) turningComplete = true;
       break;
     case 'B':
       pivotRight(baseSpeed);
@@ -377,7 +402,28 @@ void executeTurn(){
   }
 }
 
-
+void optimizePath(){
+    while(pathIndex>3 || path[pathIndex-2] == 'B'){
+    int angle = 0;
+    for(int i = 1; i<=3; i++){
+      switch(path[pathIndex-i]){
+        case 'R' : angle += 270; break;
+        case 'L' : angle += 90; break;
+        case 'B' : angle += 180; break;
+        case 'F' : angle += 0; break;
+      }
+    }
+    char simplifiedTurn;
+    switch(angle%360){
+      case 0: simplifiedTurn = 'F'; break;
+      case 90: simplifiedTurn = 'L'; break;
+      case 180: simplifiedTurn = 'B'; break;
+      case 270: simplifiedTurn = 'R'; break;
+    }
+    path[pathIndex-3] = simplifiedTurn;
+    pathIndex -= 2;
+  }
+}
 
 //Motor Functions------------------------------------------------------------------------//
 void setMotorSpeeds(int leftSpeed, int rightSpeed){
@@ -388,11 +434,11 @@ void setMotorSpeeds(int leftSpeed, int rightSpeed){
     digitalWrite(AIN1, LOW);
     digitalWrite(AIN2, LOW);
   }else if(leftSpeed>0){
-    digitalWrite(AIN1, HIGH);
-    digitalWrite(AIN2, LOW);
-  }else{
     digitalWrite(AIN1, LOW);
     digitalWrite(AIN2, HIGH);
+  }else{
+    digitalWrite(AIN1, HIGH);
+    digitalWrite(AIN2, LOW);
     leftSpeed = -leftSpeed;
   }
 
@@ -448,4 +494,39 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
   currentTime = millis();
+  checkButtons();
+
+  if(mode==calibMode) runCalibration();
+  else if(mode==dryRunMode || mode==actualRunMode){
+    readSensors();
+    normalizeReadings();
+    updateSensorBool();
+
+    switch(state){
+      case followingLine:
+        calculateLinePosition();
+        calculatePID();
+        applyPIDCorrection(baseSpeed, correction);
+        detectJunction();
+        confirmJunction();
+        checkDeadEnd();
+        break;
+      case atJunction:
+        if(currentTime-junctionRelayStartTime < junctionRepositioningRelay){
+          moveForward(baseSpeed);
+        }else{
+          stopMotors();
+          makeTurnDecision();
+        }
+        break;
+      case turning:
+        executeTurn();
+        break;
+      case atEnd:
+        stopMotors();
+        digitalWrite(endLED, HIGH);
+        mode = idleMode;
+        break;
+    }
+  }
 }
